@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mod Vetting Tool</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--text:#1c1e21;--muted:#6b7280;--line:#e2e5ea;--accent:#ff4500;--chip:#eef0f3;--warn:#b45309;--bad:#b91c1c;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#121316;--card:#1b1d22;--text:#e8eaed;--muted:#9aa1ad;--line:#2c2f36;--chip:#272a31;--warn:#fbbf24;--bad:#f87171;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:900px;margin:0 auto;padding:20px 14px 60px}
+h1{font-size:20px;margin:0 0 14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:14px}
+form{display:flex;gap:8px}
+input[type=text]{flex:1;min-width:0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font-size:15px}
+button,.btn{padding:9px 14px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--text);font-size:14px;cursor:pointer;text-decoration:none;display:inline-block}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.links{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+.tab{padding:6px 12px;border-radius:999px;background:var(--chip);border:1px solid transparent;cursor:pointer;font-size:14px}
+.tab.on{background:var(--accent);color:#fff}
+.muted{color:var(--muted)}
+.warn{color:var(--warn)}.bad{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-top:10px}
+.stat b{display:block;font-size:17px}
+.stat span{font-size:12px;color:var(--muted)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{background:var(--chip);border-radius:999px;padding:2px 10px;font-size:13px}
+.item{border-top:1px solid var(--line);padding:10px 0}
+.item:first-child{border-top:0}
+.item a.t{font-weight:600;color:var(--text);text-decoration:none;overflow-wrap:anywhere}
+.item a.t:hover{text-decoration:underline;color:var(--accent)}
+.meta{font-size:12.5px;color:var(--muted);margin-top:2px}
+.body{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px;font-size:14px}
+details summary{cursor:pointer;color:var(--accent);font-size:13px;margin-top:4px}
+.bar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+.hidden{display:none}
+#status{margin:8px 0}
+</style>
+</head>
+<body>
+<main>
+<h1>Mod Vetting Tool</h1>
+
+<div class="card">
+  <form id="f">
+    <input type="text" id="u" placeholder="Reddit username (e.g. spez or u/spez)" autocomplete="off" autocapitalize="off" spellcheck="false" autofocus>
+    <button class="primary" id="go" type="submit">Vet</button>
+  </form>
+  <div id="status" class="muted"></div>
+  <div id="ext" class="links hidden"></div>
+</div>
+
+<div id="profile" class="card hidden"></div>
+
+<div id="results" class="card hidden">
+  <div class="tabs" id="srcTabs"></div>
+  <div class="tabs" id="typeTabs"></div>
+  <div class="bar">
+    <input type="text" id="filter" placeholder="Filter shown items (text or r/subreddit)">
+  </div>
+  <div id="list"></div>
+  <div style="margin-top:10px"><button id="more" class="hidden">Load more</button></div>
+</div>
+</main>
+
+<script>
+(function(){
+"use strict";
+var REDDIT="https://www.reddit.com";
+var ARCTIC="https://arctic-shift.photon-reddit.com";
+var $=function(id){return document.getElementById(id)};
+
+var S=null; // state
+
+function esc(s){return String(s==null?"":s).replace(/[&<>"']/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]})}
+
+function cleanName(raw){
+  var s=(raw||"").trim();
+  s=s.replace(/^https?:\/\/(www\.|old\.|new\.)?reddit\.com/i,"").replace(/^\/?(u|user)\//i,"").replace(/\/.*$/,"");
+  return s;
+}
+function validName(n){return /^[A-Za-z0-9_-]{3,20}$/.test(n)}
+
+function fetchJSON(url){
+  var ctl=new AbortController();
+  var t=setTimeout(function(){ctl.abort()},20000);
+  return fetch(url,{signal:ctl.signal,headers:{"Accept":"application/json"}}).then(function(r){
+    clearTimeout(t);
+    if(!r.ok){var e=new Error("HTTP "+r.status);e.status=r.status;throw e}
+    return r.json();
+  }).catch(function(e){
+    clearTimeout(t);
+    if(e.name==="AbortError"){throw new Error("Request timed out")}
+    if(e instanceof TypeError){throw new Error("Blocked or unreachable (network/CORS)")}
+    throw e;
+  });
+}
+
+function fmtDate(ts){
+  if(!ts)return "unknown date";
+  return new Date(ts*1000).toLocaleString(undefined,{year:"numeric",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"});
+}
+function age(ts){
+  var d=Math.floor((Date.now()/1000-ts)/86400);
+  if(d<0)d=0;
+  if(d<60)return d+" days";
+  var y=Math.floor(d/365),m=Math.floor((d%365)/30);
+  return (y?y+" yr ":"")+m+" mo";
+}
+function isRemoved(t){return t==="[deleted]"||t==="[removed]"}
+
+/* ---------- normalizers ---------- */
+function normPost(p){
+  var link=p.permalink?(p.permalink.indexOf("http")===0?p.permalink:REDDIT+p.permalink):REDDIT+"/comments/"+p.id;
+  return {id:p.id,kind:"post",title:p.title||"(no title)",body:p.selftext||"",sub:p.subreddit||"",score:p.score,created:p.created_utc,url:link,num:p.num_comments,ext:(p.url&&!/reddit\.com/.test(p.url)&&p.url)||""};
+}
+function normComment(c){
+  var link;
+  if(c.permalink){link=c.permalink.indexOf("http")===0?c.permalink:REDDIT+c.permalink}
+  else{var pid=(c.link_id||"").replace(/^t3_/,"");link=REDDIT+"/comments/"+pid+"/_/"+c.id+"/"}
+  return {id:c.id,kind:"comment",title:c.link_title||"",body:c.body||"",sub:c.subreddit||"",score:c.score,created:c.created_utc,url:link};
+}
+
+/* ---------- loaders ---------- */
+function loadReddit(kind,more){
+  var src=S.src.reddit,st=src[kind];
+  var path=kind==="posts"?"submitted":"comments";
+  var url=REDDIT+"/user/"+encodeURIComponent(S.user)+"/"+path+".json?limit=100&raw_json=1&sort=new"+(more&&st.after?"&after="+encodeURIComponent(st.after):"");
+  return fetchJSON(url).then(function(j){
+    var ch=(j.data&&j.data.children)||[];
+    ch.forEach(function(c){st.items.push(kind==="posts"?normPost(c.data):normComment(c.data))});
+    st.after=j.data&&j.data.after||null;
+    st.more=!!st.after;st.err=null;st.loaded=true;
+  }).catch(function(e){st.err=e.message;st.loaded=true;st.more=false});
+}
+function loadArctic(kind,more){
+  var src=S.src.arctic,st=src[kind];
+  var ep=kind==="posts"?"posts":"comments";
+  var url=ARCTIC+"/api/"+ep+"/search?author="+encodeURIComponent(S.user)+"&limit=100&sort=desc";
+  if(more&&st.cursor)url+="&before="+encodeURIComponent(st.cursor);
+  return fetchJSON(url).then(function(j){
+    var arr=(j&&j.data)||[];
+    var seen={};st.items.forEach(function(i){seen[i.id]=1});
+    var added=0;
+    arr.forEach(function(x){
+      if(seen[x.id])return;
+      st.items.push(kind==="posts"?normPost(x):normComment(x));added++;
+    });
+    if(arr.length){st.cursor=new Date(arr[arr.length-1].created_utc*1000).toISOString()}
+    st.more=arr.length>=100&&added>0;st.err=null;st.loaded=true;
+  }).catch(function(e){st.err=e.message;st.loaded=true;st.more=false});
+}
+function loadAbout(){
+  return fetchJSON(REDDIT+"/user/"+encodeURIComponent(S.user)+"/about.json?raw_json=1").then(function(j){
+    S.about=j.data||null;S.aboutErr=null;
+  }).catch(function(e){
+    S.about=null;S.aboutErr=(e.status===404)?"Not found on Reddit (deleted, banned/shadowbanned, or misspelled).":e.message;
+  });
+}
+
+/* ---------- render ---------- */
+function renderExternal(){
+  var u=encodeURIComponent(S.user);
+  var links=[
+    ["Reddit profile",REDDIT+"/user/"+u+"/"],
+    ["Google: \""+S.user+"\"","https://www.google.com/search?q="+encodeURIComponent('"'+S.user+'"')],
+    ["Google: \""+S.user+"\" reddit","https://www.google.com/search?q="+encodeURIComponent('"'+S.user+'" reddit')],
+    ["Google: site:reddit.com","https://www.google.com/search?q="+encodeURIComponent('site:reddit.com "'+S.user+'"')],
+    ["Arctic Shift (web UI)",ARCTIC+"/search?fun=posts_search&author="+u]
+  ];
+  var box=$("ext");
+  box.innerHTML=links.map(function(l){return '<a class="btn" target="_blank" rel="noopener noreferrer" href="'+esc(l[1])+'">'+esc(l[0])+' ↗</a>'}).join("");
+  box.classList.remove("hidden");
+}
+
+function renderProfile(){
+  var box=$("profile");box.classList.remove("hidden");
+  var a=S.about;
+  if(!a){
+    box.innerHTML='<b>u/'+esc(S.user)+'</b><div class="bad" style="margin-top:6px">Profile: '+esc(S.aboutErr||"unavailable")+'</div>'+
+      '<div class="muted" style="margin-top:4px">Archive data from Arctic Shift may still be shown below.</div>';
+    return;
+  }
+  var flags=[];
+  if(a.is_suspended)flags.push('<span class="bad">Suspended</span>');
+  if(a.is_gold)flags.push("Premium");
+  if(a.is_employee)flags.push("Reddit employee");
+  if(a.verified||a.has_verified_email)flags.push("Verified email");
+  var desc=a.subreddit&&a.subreddit.public_description?a.subreddit.public_description:"";
+  var icon=(a.icon_img||"").split("?")[0];
+  box.innerHTML=
+   '<div style="display:flex;gap:12px;align-items:center">'+
+   (icon?'<img src="'+esc(icon)+'" alt="" width="52" height="52" referrerpolicy="no-referrer" style="border-radius:50%;background:var(--chip)">':'')+
+   '<div><b style="font-size:17px">u/'+esc(a.name||S.user)+'</b><div class="muted">'+(flags.join(" · ")||"&nbsp;")+'</div></div></div>'+
+   (desc?'<div class="body">'+esc(desc)+'</div>':'')+
+   '<div class="grid">'+
+   stat("Account created",a.created_utc?fmtDate(a.created_utc):"?")+
+   stat("Account age",a.created_utc?age(a.created_utc):"?")+
+   stat("Post karma",a.link_karma)+
+   stat("Comment karma",a.comment_karma)+
+   stat("Total karma",a.total_karma)+
+   '</div>';
+}
+function stat(l,v){return '<div class="stat"><b>'+esc(v==null?"?":v)+'</b><span>'+esc(l)+'</span></div>'}
+
+function renderTabs(){
+  var names={reddit:"Reddit (live)",arctic:"Arctic Shift (archive)"};
+  $("srcTabs").innerHTML=["reddit","arctic"].map(function(k){
+    var n=S.src[k].posts.items.length+S.src[k].comments.items.length;
+    return '<span class="tab'+(S.cur===k?" on":"")+'" data-src="'+k+'">'+names[k]+' ('+n+')</span>';
+  }).join("");
+  $("typeTabs").innerHTML=["posts","comments"].map(function(t){
+    var n=S.src[S.cur][t].items.length;
+    return '<span class="tab'+(S.type===t?" on":"")+'" data-type="'+t+'">'+(t==="posts"?"Posts":"Comments")+' ('+n+')</span>';
+  }).join("");
+}
+
+function renderList(){
+  var st=S.src[S.cur][S.type];
+  var q=$("filter").value.trim().toLowerCase();
+  var items=st.items.filter(function(i){
+    if(!q)return true;
+    return (i.title+" "+i.body+" r/"+i.sub).toLowerCase().indexOf(q)!==-1;
+  });
+  var html="";
+  if(st.err)html+='<div class="bad">Error: '+esc(st.err)+'</div>';
+  if(!st.items.length&&!st.err&&st.loaded)html+='<div class="muted">Nothing found.</div>';
+  if(!st.loaded)html+='<div class="muted">Loading…</div>';
+  // subreddit breakdown
+  if(st.items.length){
+    var cnt={};st.items.forEach(function(i){cnt[i.sub]=(cnt[i.sub]||0)+1});
+    var top=Object.keys(cnt).sort(function(a,b){return cnt[b]-cnt[a]}).slice(0,15);
+    html+='<div class="muted">Loaded '+st.items.length+' · subreddits:</div><div class="chips">'+
+      top.map(function(s){return '<span class="chip" data-sub="'+esc(s)+'" style="cursor:pointer">r/'+esc(s)+' · '+cnt[s]+'</span>'}).join("")+'</div><div style="height:8px"></div>';
+  }
+  html+=items.map(function(i){
+    var removed=isRemoved(i.body)||(i.kind==="post"&&isRemoved(i.title));
+    var head=i.kind==="post"?i.title:(i.title||("Comment in r/"+i.sub));
+    var bodyHtml="";
+    if(i.body){
+      var long=i.body.length>400;
+      var warn=isRemoved(i.body)?' <span class="warn">('+esc(i.body)+')</span>':"";
+      bodyHtml=long?
+        '<details><summary>Show text'+warn+'</summary><div class="body">'+esc(i.body)+'</div></details>':
+        '<div class="body">'+esc(i.body)+'</div>';
+    }
+    return '<div class="item">'+
+      '<a class="t" target="_blank" rel="noopener noreferrer" href="'+esc(i.url)+'">'+esc(head)+'</a>'+
+      '<div class="meta">r/'+esc(i.sub)+' · '+esc(fmtDate(i.created))+' · score '+esc(i.score==null?"?":i.score)+
+      (i.kind==="post"&&i.num!=null?' · '+esc(i.num)+' comments':'')+
+      (removed?' · <span class="warn">removed/deleted</span>':'')+'</div>'+
+      bodyHtml+'</div>';
+  }).join("");
+  if(q&&!items.length)html+='<div class="muted">No loaded items match the filter.</div>';
+  $("list").innerHTML=html;
+  var m=$("more");
+  m.classList.toggle("hidden",!st.more);
+  m.disabled=false;m.textContent="Load more";
+}
+function renderAll(){renderTabs();renderList()}
+
+/* ---------- main ---------- */
+function newKind(){return {items:[],after:null,cursor:null,more:false,err:null,loaded:false}}
+
+function run(name){
+  S={user:name,about:null,aboutErr:null,cur:"reddit",type:"posts",
+     src:{reddit:{posts:newKind(),comments:newKind()},arctic:{posts:newKind(),comments:newKind()}}};
+  $("filter").value="";
+  $("status").textContent="Loading data for u/"+name+"…";
+  $("go").disabled=true;
+  $("profile").classList.add("hidden");
+  $("results").classList.remove("hidden");
+  renderExternal();renderAll();
+  var cur=S;
+  Promise.all([
+    loadAbout(),
+    loadReddit("posts"),loadReddit("comments"),
+    loadArctic("posts"),loadArctic("comments")
+  ]).then(function(){
+    if(cur!==S)return;
+    renderProfile();
+    var r=S.src.reddit,a=S.src.arctic;
+    var msgs=[];
+    if(r.posts.err||r.comments.err||S.aboutErr&&!S.about)msgs.push("Some Reddit requests failed (see tabs). Reddit may block browser requests; the Arctic Shift tab can still work.");
+    if(a.posts.err||a.comments.err)msgs.push("Some Arctic Shift requests failed.");
+    $("status").textContent=msgs.join(" ");
+    // default to whichever source has data
+    if(!r.posts.items.length&&!r.comments.items.length&&(a.posts.items.length||a.comments.items.length))S.cur="arctic";
+    if(!S.src[S.cur].posts.items.length&&S.src[S.cur].comments.items.length)S.type="comments";
+    $("go").disabled=false;
+    renderAll();
+  });
+}
+
+$("f").addEventListener("submit",function(e){
+  e.preventDefault();
+  var n=cleanName($("u").value);
+  if(!validName(n)){$("status").innerHTML='<span class="bad">Enter a valid username (3–20 letters, numbers, _ or -).</span>';return}
+  $("u").value=n;
+  try{history.replaceState(null,"","?u="+encodeURIComponent(n))}catch(_){}
+  run(n);
+});
+$("srcTabs").addEventListener("click",function(e){var s=e.target.getAttribute("data-src");if(s&&S){S.cur=s;renderAll()}});
+$("typeTabs").addEventListener("click",function(e){var t=e.target.getAttribute("data-type");if(t&&S){S.type=t;renderAll()}});
+$("filter").addEventListener("input",function(){if(S)renderList()});
+$("list").addEventListener("click",function(e){
+  var s=e.target.getAttribute&&e.target.getAttribute("data-sub");
+  if(s){$("filter").value="r/"+s;renderList()}
+});
+$("more").addEventListener("click",function(){
+  if(!S)return;
+  var b=$("more");b.disabled=true;b.textContent="Loading…";
+  var cur=S,src=S.cur,type=S.type;
+  (src==="reddit"?loadReddit:loadArctic)(type,true).then(function(){if(cur===S)renderAll()});
+});
+
+var pre=new URLSearchParams(location.search).get("u");
+if(pre){$("u").value=pre;$("f").dispatchEvent(new Event("submit",{cancelable:true}))}
+})();
+</script>
+</body>
+</html>

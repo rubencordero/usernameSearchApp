@@ -84,10 +84,14 @@ function cleanName(raw){
 }
 function validName(n){return /^[A-Za-z0-9_-]{3,20}$/.test(n)}
 
+// Optional: paste your Cloudflare Worker URL here (no trailing slash), e.g. "https://reddit-proxy.yourname.workers.dev"
+var PROXY="";
+
 function fetchJSON(url){
   var ctl=new AbortController();
   var t=setTimeout(function(){ctl.abort()},20000);
-  return fetch(url,{signal:ctl.signal,headers:{"Accept":"application/json"}}).then(function(r){
+  var target=(PROXY&&url.indexOf(REDDIT)===0)?PROXY+"/?url="+encodeURIComponent(url):url;
+  return fetch(target,{signal:ctl.signal,headers:{"Accept":"application/json"}}).then(function(r){
     clearTimeout(t);
     if(!r.ok){var e=new Error("HTTP "+r.status);e.status=r.status;throw e}
     return r.json();
@@ -157,7 +161,7 @@ function loadAbout(){
   return fetchJSON(REDDIT+"/user/"+encodeURIComponent(S.user)+"/about.json?raw_json=1").then(function(j){
     S.about=j.data||null;S.aboutErr=null;
   }).catch(function(e){
-    S.about=null;S.aboutErr=(e.status===404)?"Not found on Reddit (deleted, banned/shadowbanned, or misspelled).":e.message;
+    S.about=null;S.aboutStatus=e.status||0;S.aboutErr=(e.status===404)?"Not found on Reddit (deleted, banned/shadowbanned, or misspelled).":e.message;
   });
 }
 
@@ -176,9 +180,31 @@ function renderExternal(){
   box.classList.remove("hidden");
 }
 
+// Reddit live data counts as "blocked" when every live request failed and it wasn't a plain 404 (user not found).
+function redditBlocked(){
+  if(!S)return false;
+  var r=S.src.reddit;
+  return !S.about&&S.aboutStatus!==404&&!!r.posts.err&&!!r.comments.err;
+}
+
 function renderProfile(){
   var box=$("profile");box.classList.remove("hidden");
   var a=S.about;
+  if(!a&&redditBlocked()){
+    var base=REDDIT+"/user/"+encodeURIComponent(S.user);
+    box.innerHTML=
+      '<b style="font-size:17px">u/'+esc(S.user)+'</b>'+
+      '<div style="margin-top:8px"><b>Live Reddit data isn’t available in this tool right now.</b></div>'+
+      '<div class="muted" style="margin-top:4px">Reddit is refusing the request from this browser or network. '+
+      'Open the profile on Reddit to check account age, karma and visible activity. '+
+      'Archived posts and comments (including deleted ones) are shown below from Arctic Shift.</div>'+
+      '<div class="links">'+
+      '<a class="btn primary" target="_blank" rel="noopener noreferrer" href="'+esc(base+"/")+'">Open profile on Reddit ↗</a>'+
+      '<a class="btn" target="_blank" rel="noopener noreferrer" href="'+esc(base+"/submitted/")+'">Posts ↗</a>'+
+      '<a class="btn" target="_blank" rel="noopener noreferrer" href="'+esc(base+"/comments/")+'">Comments ↗</a>'+
+      '</div>';
+    return;
+  }
   if(!a){
     box.innerHTML='<b>u/'+esc(S.user)+'</b><div class="bad" style="margin-top:6px">Profile: '+esc(S.aboutErr||"unavailable")+'</div>'+
       '<div class="muted" style="margin-top:4px">Archive data from Arctic Shift may still be shown below.</div>';
@@ -208,6 +234,7 @@ function stat(l,v){return '<div class="stat"><b>'+esc(v==null?"?":v)+'</b><span>
 
 function renderTabs(){
   var names={reddit:"Reddit (live)",arctic:"Arctic Shift (archive)"};
+  $("srcTabs").classList.toggle("hidden",redditBlocked());
   $("srcTabs").innerHTML=["reddit","arctic"].map(function(k){
     var n=S.src[k].posts.items.length+S.src[k].comments.items.length;
     return '<span class="tab'+(S.cur===k?" on":"")+'" data-src="'+k+'">'+names[k]+' ('+n+')</span>';
@@ -284,7 +311,8 @@ function run(name){
     renderProfile();
     var r=S.src.reddit,a=S.src.arctic;
     var msgs=[];
-    if(r.posts.err||r.comments.err||S.aboutErr&&!S.about)msgs.push("Some Reddit requests failed (see tabs). Reddit may block browser requests; the Arctic Shift tab can still work.");
+    if(redditBlocked())S.cur="arctic";
+    if(!redditBlocked()&&(r.posts.err||r.comments.err||S.aboutErr&&!S.about))msgs.push("Some Reddit requests failed (see tabs). Reddit may block browser requests; the Arctic Shift tab can still work.");
     if(a.posts.err||a.comments.err)msgs.push("Some Arctic Shift requests failed.");
     $("status").textContent=msgs.join(" ");
     // default to whichever source has data
